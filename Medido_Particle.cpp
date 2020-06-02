@@ -1,3 +1,8 @@
+/******************************************************/
+//       THIS IS A GENERATED FILE - DO NOT EDIT       //
+/******************************************************/
+
+#line 1 "/home/davidmcq/particle/Medido_Particle/src/Medido_Particle.ino"
 /*
  * Project Medido_Particle
  * Description: Control code for Medido Pump .. Particle Argon
@@ -7,6 +12,23 @@
 
 #include <Particle.h>
 
+void powerDownTimeout();
+void loop();
+void setup();
+void gpioCBFill();
+void gpioCBEmpty();
+void gpioCBStop();
+void setRunSpeed(int pw);
+void setPumpSpeed(float ps);
+void setPumpFwd();
+void setPumpRev();
+void sendSPI(String str, float val);
+float adcVolts(float vRaw);
+void timerCB();
+void onLinefeed(String msg);
+void execKwd(String k, String v);
+void execCmd(String k, String v);
+#line 10 "/home/davidmcq/particle/Medido_Particle/src/Medido_Particle.ino"
 SYSTEM_THREAD(ENABLED);
 SYSTEM_MODE(SEMI_AUTOMATIC);
 
