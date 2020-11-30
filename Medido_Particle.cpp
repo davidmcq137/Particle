@@ -82,7 +82,7 @@ int saveSetSpeed = 0;
 unsigned long pumpStartTime = 0;
 unsigned long pumpStopTime = 0;
 float runningTime = 0.0;
-int flowCount = 0;
+float flowCount = 0;
 int pumpTimer = 0;
 int watchTimer = 0;
 int powerOffMins = 30;
@@ -97,6 +97,7 @@ int seq = 0;
 unsigned long lastLoop = 0;
 unsigned long loopMinTime = 20;
 bool medidoEnabled = true;
+bool haveDisplay = false;
 
 const size_t UART_TX_BUF_SIZE = 20;
 void onDataReceived(const uint8_t *data, size_t len, const BlePeerDevice &peer, void *context);
@@ -193,25 +194,46 @@ void loop()
 
 Adafruit_SSD1306 display(OLED_RESET);
 
+double ddisp;
+
 // setup() runs once, when the device is first turned on.
 void setup()
 {
+  //bool haveDisplay = false;
+  
+  unsigned long tdisp;
+  float fdisp;
+  
   bootTime = millis();
 
   Serial.begin();
 
-  
+  //Serial.println("starting setup");
+
+  tdisp = micros();
+
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // initialize with the I2C addr 0x3D (for the 128x64)
   display.clearDisplay();   // clears the screen and buffer
   display.setTextSize(1);
   display.setTextColor(WHITE);
+  fdisp = (float) (micros() - tdisp);
   lineLCD0();
   lineLCD(1, "Pump Ready");
+  //lineLCDf(2, "Time: ", fdisp, "%4.4f", "uS");
+  ddisp = (double)fdisp;
+  //Particle.variable("DispTime", &ddisp, DOUBLE);
+  
+  // since there is no easy way to get display status from the adafruit api, time how long the init takes
+  // typically it's a little over 20,000 us .. so if over 2x that we must not have a display
+
+  if (fdisp < 40000.) {
+    haveDisplay = true;
+  }
+
   showLCD();
 
   BLE.on();
-  //Serial.println("starting setup");
-
+  
   powerTimer.start();
 
   BLE.addCharacteristic(txCharacteristic);
@@ -220,6 +242,7 @@ void setup()
   BleAdvertisingData data;
   data.appendServiceUUID(serviceUuid);
   BLE.advertise(&data);
+
 
   pinMode(pwmPumpPin, OUTPUT);
   analogWriteResolution(pwmPumpPin, 10);
@@ -299,19 +322,21 @@ void lineLCD(int line, String text)
   strcpy(textLCD[line-1], text.c_str());
 }
 
+
+
 void lineLCDf(int line, String text, float val, String fmt, String sfx)
 {
-  Serial.println(" ");
-  Serial.print("line:");
-  Serial.println(line);
-  Serial.print("text:");
-  Serial.println(text);
-  Serial.print("val:");
-  Serial.println(val);
-  Serial.print("fmt:");
-  Serial.println(fmt);
-  Serial.print("sfx:");
-  Serial.println(sfx);
+  //Serial.println(" ");
+  //Serial.print("line:");
+  //Serial.println(line);
+  //Serial.print("text:");
+  //Serial.println(text);
+  //Serial.print("val:");
+  //Serial.println(val);
+  //Serial.print("fmt:");
+  //Serial.println(fmt);
+  //Serial.print("sfx:");
+  //Serial.println(sfx);
   
   sprintf(textLCD[line-1], text + fmt + sfx, val);
 }
@@ -319,29 +344,33 @@ void lineLCDf(int line, String text, float val, String fmt, String sfx)
 void lineLCDd(int line, String text, int val, String fmt, String sfx)
 {
 
-  Serial.println(" ");
-  Serial.print("line:");
-  Serial.println(line);
-  Serial.print("text:");
-  Serial.println(text);
-  Serial.print("val:");
-  Serial.println(val);
-  Serial.print("fmt:");
-  Serial.println(fmt);
-  Serial.print("sfx:");
-  Serial.println(sfx);
+  //Serial.println(" ");
+  //Serial.print("line:");
+  //Serial.println(line);
+  //Serial.print("text:");
+  //Serial.println(text);
+  //Serial.print("val:");
+  //Serial.println(val);
+  //Serial.print("fmt:");
+  //Serial.println(fmt);
+  //Serial.print("sfx:");
+  //Serial.println(sfx);
 
   sprintf(textLCD[line-1], text + fmt + sfx, val);
 }
 
 void showLCD()
 {
+  if (!haveDisplay) {
+    return;
+  }
+
   display.clearDisplay();
   for (int i=0; i<=4; i++) {
-    Serial.print("i=");
-    Serial.println(i);
-    Serial.print("line: ");
-    Serial.println(textLCD[i]);
+    //Serial.print("i=");
+    //Serial.println(i);
+    //Serial.print("line: ");
+    //Serial.println(textLCD[i]);
     display.setCursor(0, i*13);
     display.println(textLCD[i]);
   }
@@ -403,8 +432,8 @@ void setRunSpeed(int pw)
   sendSPI("rPWM", pw);
 
   analogWrite(pwmPumpPin, pw);
-  //Serial.print("just sent pw: ");
-  //Serial.println(pw);
+  Serial.print("just sent pw: ");
+  Serial.println(pw);
 
   runPWM = pw;
 }
@@ -520,7 +549,7 @@ void timerCB()
 
   //if pressPSI < 0 then pressPSI = 0 end
 
-  flowCount = (pulseCountFill / pulsePerOzFill) - (pulseCountEmpty / pulsePerOzEmpty);
+  flowCount = ((float)pulseCountFill / pulsePerOzFill) - ((float)pulseCountEmpty / pulsePerOzEmpty);
 
   sendSPI("fCNT", flowCount);
 
@@ -634,9 +663,9 @@ void timerCB()
     {
       lineLCD(4, timeFmt(runningTime));
     }
-    Serial.print("seq:");
-    Serial.println(seq);
-    Serial.print(millis() / 1000.0);
+    //Serial.print("seq:");
+    //Serial.println(seq);
+    //Serial.print(millis() / 1000.0);
     showLCD();
 
     if (seq % 10 == 0)
@@ -777,7 +806,7 @@ void execKwd(String k, String v)
   else if (k == "update")
   {
     //Serial.println("Update command received");
-    medidoEnabled = false;
+    //medidoEnabled = false;
     sendSPI("OTA", 1); // Starting WiFi
     
     //Serial.print("ssid: ");
@@ -802,7 +831,7 @@ void execKwd(String k, String v)
       wLoops = wLoops + 1;
     }
     if (wLoops >= 300) {
-      sendSPI("OTA", -1);
+      sendSPI("OTA", -1); //No WiFi connection
       return;
     }
     sendSPI("OTA", 2); // WiFi connected
@@ -815,10 +844,10 @@ void execKwd(String k, String v)
       wLoops = wLoops + 1;
     }
     if (wLoops >= 300) {
-      sendSPI("OTA", -3);
+      sendSPI("OTA", -30); // No Particle Cloud Connection 
       return;
     }
-    sendSPI("OTA", 3); // particle cloud connected
+    sendSPI("OTA", 30); // particle cloud connected
   }
 }
 
