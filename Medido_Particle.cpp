@@ -2,16 +2,17 @@
 //       THIS IS A GENERATED FILE - DO NOT EDIT       //
 /******************************************************/
 
-#line 1 "/home/davidmcq/particle/Medido_Particle/src/Medido_Particle.ino"
+#line 1 "/home/davidmcq/particle/Medido_Particle_Central/src/Medido_Particle.ino"
 /*
  * Project Medido_Particle
  * Description: Control code for Medido Pump .. Particle Argon
  * Author: D. McQueeney
  * Date: 14-May-2020
+ * Modified to be BLE Central 25-Nov-2020
  */
 
 #include <Particle.h>
-#include "Adafruit_GFX.h"
+//#include "Adafruit_GFX.h"
 #include "Adafruit_SSD1306.h"
 
 void powerDownTimeout();
@@ -22,7 +23,7 @@ void lineLCD(int line, String text);
 void lineLCDf(int line, String text, float val, String fmt, String sfx);
 void lineLCDd(int line, String text, int val, String fmt, String sfx);
 void showLCD();
-char* timeFmt(int tt);
+char *timeFmt(int tt);
 void gpioCBFill();
 void gpioCBEmpty();
 void gpioCBStop();
@@ -36,11 +37,10 @@ void timerCB();
 void onLinefeed(String msg);
 void execKwd(String k, String v);
 void execCmd(String k, String v);
-#line 12 "/home/davidmcq/particle/Medido_Particle/src/Medido_Particle.ino"
+#line 13 "/home/davidmcq/particle/Medido_Particle_Central/src/Medido_Particle.ino"
 #define OLED_RESET D6
 
-
-SYSTEM_MODE(SEMI_AUTOMATIC);
+SYSTEM_MODE(MANUAL);
 
 float PIDpGain = 0.005;
 float PIDiGain = 2;
@@ -82,7 +82,7 @@ int saveSetSpeed = 0;
 unsigned long pumpStartTime = 0;
 unsigned long pumpStopTime = 0;
 float runningTime = 0.0;
-int flowCount = 0;
+float flowCount = 0;
 int pumpTimer = 0;
 int watchTimer = 0;
 int powerOffMins = 30;
@@ -96,9 +96,31 @@ int dh = 64;
 int seq = 0;
 unsigned long lastLoop = 0;
 unsigned long loopMinTime = 20;
+unsigned long lastTimerCB = 0;
+unsigned long minTimerCB = 200;
+
 bool medidoEnabled = true;
+bool haveDisplay = false;
 
 const size_t UART_TX_BUF_SIZE = 20;
+const size_t SCAN_RESULT_COUNT = 20;
+
+BleScanResult scanResults[SCAN_RESULT_COUNT];
+
+const unsigned long SCAN_PERIOD_MS = 2000;
+unsigned long lastScan = 0;
+
+
+const unsigned long PRT_PERIOD_MS = 1000;
+unsigned long lastPrt = 0;
+
+BleCharacteristic peerTxCharacteristic;
+BleCharacteristic peerRxCharacteristic;
+BlePeerDevice peer;
+
+uint8_t txBuf[UART_TX_BUF_SIZE];
+size_t txLen = 0;
+
 void onDataReceived(const uint8_t *data, size_t len, const BlePeerDevice &peer, void *context);
 String textacc;
 char textLCD[5][64];
@@ -139,7 +161,6 @@ void loop()
 
   if (medidoEnabled)
   {
-
     if (loopTimLast != 0)
     {
       loopDelta = micros() - loopTimLast;
@@ -175,17 +196,93 @@ void loop()
 
     if (BLE.connected())
     {
-      uint8_t txBuf[UART_TX_BUF_SIZE];
-      size_t txLen = 0;
-
-      while (Serial.available() && txLen < UART_TX_BUF_SIZE)
+      //Serial.println("BLE connected");
+      if (millis() - lastPrt >= PRT_PERIOD_MS)
       {
-        txBuf[txLen++] = Serial.read();
-        Serial.write(txBuf[txLen - 1]);
+        //for (size_t ii = 0; ii < 1; ii++)
+        //{
+        //  txBuf[ii] = 65;
+        //}
+        //txLen = 1;
+        //peerRxCharacteristic.setValue(txBuf, txLen);
+        //Serial.println("PRT!");
+        //sendSPI("FOO", 137.0);
+        //lastPrt = millis();
+        txLen = 0;
       }
-      if (txLen > 0)
+      //while (Serial.available() && txLen < UART_TX_BUF_SIZE)
+      //{
+      //  txBuf[txLen++] = Serial.read();
+      //  Serial.write(txBuf[txLen - 1]);
+      //}
+      //Serial.print("txLen: ");
+      //Serial.println(txLen);
+      //if (txLen > 0)
+      //{
+        // Transmit the data to the BLE peripheral
+        //Serial.print("txLen: ");
+        //Serial.println(txLen);
+        //peerRxCharacteristic.setValue(txBuf, txLen);
+
+        //txLen = 0;
+        //Serial.println(txLen);
+      //}
+      //uint8_t txBuf[UART_TX_BUF_SIZE];
+      //size_t txLen = 0;
+
+      //while (Serial.available() && txLen < UART_TX_BUF_SIZE)
+      //{
+      //  txBuf[txLen++] = Serial.read();
+      //  Serial.write(txBuf[txLen - 1]);
+      //}
+      //if (txLen > 0)
+      //{
+      //  txCharacteristic.setValue(txBuf, txLen);
+      //}
+    }
+    else
+    {
+      if (millis() - lastScan >= SCAN_PERIOD_MS)
       {
-        txCharacteristic.setValue(txBuf, txLen);
+        // Time to scan
+        lastScan = millis();
+
+        size_t count = BLE.scan(scanResults, SCAN_RESULT_COUNT);
+        //Serial.print("Count: ");
+        //Serial.println(137);
+        if (count > 0)
+        {
+          for (uint8_t ii = 0; ii < count; ii++)
+          {
+            // Our serial peripheral only supports one service, so we only look for one here.
+            // In some cases, you may want to get all of the service UUIDs and scan the list
+            // looking to see if the serviceUuid is anywhere in the list.
+            BleUuid foundServiceUuid;
+            size_t svcCount = scanResults[ii].advertisingData.serviceUUID(&foundServiceUuid, 1);
+            if (svcCount > 0 && foundServiceUuid == serviceUuid)
+            {
+
+              peer = BLE.connect(scanResults[ii].address);
+              //Serial.print("peer: ");
+              //Serial.println((int)peer);
+              if (peer.connected())
+              {
+                Serial.printlnf("successfully connected %02X:%02X:%02X:%02X:%02X:%02X!",
+                                scanResults[ii].address[0], scanResults[ii].address[1], scanResults[ii].address[2],
+                                scanResults[ii].address[3], scanResults[ii].address[4], scanResults[ii].address[5]);
+                peer.getCharacteristicByUUID(peerTxCharacteristic, txUuid);
+                //Serial.print("txUuid");
+                //Serial.println(txUuid);
+                peer.getCharacteristicByUUID(peerRxCharacteristic, rxUuid);
+                Serial.println("xxx");
+
+                // Could do this instead, but since the names are not as standardized, UUIDs are better
+                // peer.getCharacteristicByDescription(peerTxCharacteristic, "tx");
+              }
+              break;
+            }
+          }
+        }
       }
     }
   }
@@ -193,33 +290,55 @@ void loop()
 
 Adafruit_SSD1306 display(OLED_RESET);
 
+double ddisp;
+
 // setup() runs once, when the device is first turned on.
 void setup()
 {
+  //bool haveDisplay = false;
+
+  unsigned long tdisp;
+  float fdisp;
+
   bootTime = millis();
 
-  Serial.begin();
+  Serial.begin(115200);
 
-  
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // initialize with the I2C addr 0x3D (for the 128x64)
-  display.clearDisplay();   // clears the screen and buffer
+  Serial.println("starting setup");
+
+  tdisp = micros();
+
+  display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // initialize with the I2C addr 0x3D (for the 128x64)
+  display.clearDisplay();                    // clears the screen and buffer
   display.setTextSize(1);
   display.setTextColor(WHITE);
+  fdisp = (float)(micros() - tdisp);
   lineLCD0();
   lineLCD(1, "Pump Ready");
+  //lineLCDf(2, "Time: ", fdisp, "%4.4f", "uS");
+  ddisp = (double)fdisp;
+  //Particle.variable("DispTime", &ddisp, DOUBLE);
+
+  // since there is no easy way to get display status from the adafruit api, time how long the init takes
+  // typically it's a little over 20,000 us .. so if over 2x that we must not have a display
+
+  if (fdisp < 40000.)
+  {
+    haveDisplay = true;
+  }
+
   showLCD();
-
-  BLE.on();
-  //Serial.println("starting setup");
-
   powerTimer.start();
 
-  BLE.addCharacteristic(txCharacteristic);
-  BLE.addCharacteristic(rxCharacteristic);
+  BLE.on();
+  peerTxCharacteristic.onDataReceived(onDataReceived, &peerTxCharacteristic); 
 
-  BleAdvertisingData data;
-  data.appendServiceUUID(serviceUuid);
-  BLE.advertise(&data);
+  //BLE.addCharacteristic(txCharacteristic);
+  //BLE.addCharacteristic(rxCharacteristic);
+
+  //BleAdvertisingData data;
+  //data.appendServiceUUID(serviceUuid);
+  //BLE.advertise(&data);
 
   pinMode(pwmPumpPin, OUTPUT);
   analogWriteResolution(pwmPumpPin, 10);
@@ -277,8 +396,8 @@ void setup()
 
   pinMode(dispRstPin, OUTPUT);
 
-  sendSPI("Init", 0);
-  sendSPI("rPWM", 0);
+  sendSPI("Init", 0.0);
+  sendSPI("rPWM", 0.0);
 
   // mainLoop.start();
 
@@ -288,7 +407,7 @@ void setup()
 void lineLCD0()
 {
   //display.clearDisplay();
-  for (int i=0; i<=4; i++)
+  for (int i = 0; i <= 4; i++)
   {
     strcpy(textLCD[i], "");
   }
@@ -296,66 +415,75 @@ void lineLCD0()
 
 void lineLCD(int line, String text)
 {
-  strcpy(textLCD[line-1], text.c_str());
+  strcpy(textLCD[line - 1], text.c_str());
 }
 
 void lineLCDf(int line, String text, float val, String fmt, String sfx)
 {
-  Serial.println(" ");
-  Serial.print("line:");
-  Serial.println(line);
-  Serial.print("text:");
-  Serial.println(text);
-  Serial.print("val:");
-  Serial.println(val);
-  Serial.print("fmt:");
-  Serial.println(fmt);
-  Serial.print("sfx:");
-  Serial.println(sfx);
-  
-  sprintf(textLCD[line-1], text + fmt + sfx, val);
+  //Serial.println(" ");
+  //Serial.print("line:");
+  //Serial.println(line);
+  //Serial.print("text:");
+  //Serial.println(text);
+  //Serial.print("val:");
+  //Serial.println(val);
+  //Serial.print("fmt:");
+  //Serial.println(fmt);
+  //Serial.print("sfx:");
+  //Serial.println(sfx);
+
+  sprintf(textLCD[line - 1], text + fmt + sfx, val);
 }
 
 void lineLCDd(int line, String text, int val, String fmt, String sfx)
 {
 
-  Serial.println(" ");
-  Serial.print("line:");
-  Serial.println(line);
-  Serial.print("text:");
-  Serial.println(text);
-  Serial.print("val:");
-  Serial.println(val);
-  Serial.print("fmt:");
-  Serial.println(fmt);
-  Serial.print("sfx:");
-  Serial.println(sfx);
+  //Serial.println(" ");
+  //Serial.print("line:");
+  //Serial.println(line);
+  //Serial.print("text:");
+  //Serial.println(text);
+  //Serial.print("val:");
+  //Serial.println(val);
+  //Serial.print("fmt:");
+  //Serial.println(fmt);
+  //Serial.print("sfx:");
+  //Serial.println(sfx);
 
-  sprintf(textLCD[line-1], text + fmt + sfx, val);
+  sprintf(textLCD[line - 1], text + fmt + sfx, val);
 }
 
 void showLCD()
 {
+  if (!haveDisplay)
+  {
+    return;
+  }
+
   display.clearDisplay();
-  for (int i=0; i<=4; i++) {
-    Serial.print("i=");
-    Serial.println(i);
-    Serial.print("line: ");
-    Serial.println(textLCD[i]);
-    display.setCursor(0, i*13);
+  for (int i = 0; i <= 4; i++)
+  {
+    //Serial.print("i=");
+    //Serial.println(i);
+    //Serial.print("line: ");
+    //Serial.println(textLCD[i]);
+    display.setCursor(0, i * 13);
     display.println(textLCD[i]);
   }
   display.display();
 }
 char tstr[32];
-char* timeFmt(int tt)
+char *timeFmt(int tt)
 {
-  
+
   int min;
   int sec;
-    if (tt < 60) {
+  if (tt < 60)
+  {
     sprintf(tstr, "Running Time %d sec", tt);
-  } else {
+  }
+  else
+  {
     min = tt / 60;
     sec = tt - 60 * min;
     sprintf(tstr, "Running Time %2d:%02d min", min, sec);
@@ -403,8 +531,8 @@ void setRunSpeed(int pw)
   sendSPI("rPWM", pw);
 
   analogWrite(pwmPumpPin, pw);
-  //Serial.print("just sent pw: ");
-  //Serial.println(pw);
+  Serial.print("just sent pw: ");
+  Serial.println(pw);
 
   runPWM = pw;
 }
@@ -467,6 +595,10 @@ void setPumpRev()
 
 void sendSPI(String str, float val)
 {
+  //Serial.print("string: ");
+  //Serial.println(str);
+  //Serial.print("val: ");
+  //Serial.println(val);
   {
     size_t nch;
     char buf[20];
@@ -477,7 +609,8 @@ void sendSPI(String str, float val)
     {
       txbuf[ii] = (int)buf[ii];
     }
-    txCharacteristic.setValue(txbuf, nch);
+    peerRxCharacteristic.setValue(txbuf, nch);  
+    //txCharacteristic.setValue(txbuf, nch);
   }
 }
 
@@ -508,9 +641,14 @@ void timerCB()
 
   // send the app a message if we get #pulses > pulseStop  at piss tank sensor
 
+  if (millis() - lastTimerCB < minTimerCB) {
+    return;
+  }
+
+  lastTimerCB = millis();
   if (pulseCountStop > pulseStop)
   {
-    sendSPI("pSTP", pulseCountStop);
+    sendSPI("pSTP", (float)pulseCountStop);
     pulseCountStop = 0;
   }
 
@@ -520,13 +658,13 @@ void timerCB()
 
   //if pressPSI < 0 then pressPSI = 0 end
 
-  flowCount = (pulseCountFill / pulsePerOzFill) - (pulseCountEmpty / pulsePerOzEmpty);
+  flowCount = ((float)pulseCountFill / pulsePerOzFill) - ((float)pulseCountEmpty / pulsePerOzEmpty);
 
   sendSPI("fCNT", flowCount);
 
   if (pulseCountBad != lastPulseCountBad)
   {
-    sendSPI("cBAD", pulseCountBad);
+    sendSPI("cBAD", (float)pulseCountBad);
     lastPulseCountBad = pulseCountBad;
   }
 
@@ -546,9 +684,10 @@ void timerCB()
     deltaFEmpty = (pulseCountEmpty - lastPulseCountEmpty) / pulsePerOzEmpty;
     deltaF = deltaFFill - deltaFEmpty;
     flowRate = flowRate - (flowRate - (deltaF / deltaT)) / 1.2;
-    sendSPI("fRAT", flowRate);
-    sendSPI("fDEL", deltaF);
-    sendSPI("fDET", deltaT);
+    sendSPI("fRAT", (float)flowRate);
+    sendSPI("fCLK", (float)(millis() - bootTime));
+    //sendSPI("fDEL", deltaF);
+    //sendSPI("fDET", deltaT);
     lastPulseCountFill = pulseCountFill;
     lastPulseCountEmpty = pulseCountEmpty;
     lastFlowTime = now;
@@ -624,7 +763,7 @@ void timerCB()
   //if ((seq % 5 == 0) && (millis() - bootTime > 5000))
   if (millis() - bootTime > 5000)
   {
-    lineLCDf(2, "Flow Rate ", flowRate,  "%2.1f", " oz/s");
+    lineLCDf(2, "Flow Rate ", flowRate, "%2.1f", " oz/s");
     lineLCDf(3, "Volume", flowCount, "%4.1f", " oz");
     if (runPWM == 0)
     {
@@ -634,18 +773,18 @@ void timerCB()
     {
       lineLCD(4, timeFmt(runningTime));
     }
-    Serial.print("seq:");
-    Serial.println(seq);
-    Serial.print(millis() / 1000.0);
+    //Serial.print("seq:");
+    //Serial.println(seq);
+    //Serial.print(millis() / 1000.0);
     showLCD();
 
     if (seq % 10 == 0)
     {
       vbatt = (float)analogRead(A1) * 0.5644 * 3.3 / 4096.;
       sendSPI("Batt", vbatt); // kludge: 8266 version has 7.504:1 divider, Argon version is 4.235 .. correct for that
-                                                                      //should just send volts and change 8266 code and ios app..
-                                                                      
-      lineLCDf(5, "Pump Battery ", vbatt * 7.504 , "%2.2f", "V"); // 7.504 is the resistive divider .. ios app applies it in swift .. should make uniform...
+                              //should just send volts and change 8266 code and ios app..
+
+      lineLCDf(5, "Pump Battery ", vbatt * 7.504, "%2.2f", "V"); // 7.504 is the resistive divider .. ios app applies it in swift .. should make uniform...
       //sendSPI("Batt", 12.3/7.5);
     }
     if (seq % 10 == 6)
@@ -777,9 +916,9 @@ void execKwd(String k, String v)
   else if (k == "update")
   {
     //Serial.println("Update command received");
-    medidoEnabled = false;
+    //medidoEnabled = false;
     sendSPI("OTA", 1); // Starting WiFi
-    
+
     //Serial.print("ssid: ");
     //Serial.println(wifissid);
     //Serial.print("pwd: ");
@@ -797,12 +936,14 @@ void execKwd(String k, String v)
     WiFi.connect();
 
     int wLoops = 0;
-    while (!WiFi.ready() && wLoops < 300){ //timeout 30 seconds if no wifi or bad creds
+    while (!WiFi.ready() && wLoops < 300)
+    { //timeout 30 seconds if no wifi or bad creds
       delay(100);
       wLoops = wLoops + 1;
     }
-    if (wLoops >= 300) {
-      sendSPI("OTA", -1);
+    if (wLoops >= 300)
+    {
+      sendSPI("OTA", -1); //No WiFi connection
       return;
     }
     sendSPI("OTA", 2); // WiFi connected
@@ -814,11 +955,12 @@ void execKwd(String k, String v)
       delay(100);
       wLoops = wLoops + 1;
     }
-    if (wLoops >= 300) {
-      sendSPI("OTA", -3);
+    if (wLoops >= 300)
+    {
+      sendSPI("OTA", -30); // No Particle Cloud Connection
       return;
     }
-    sendSPI("OTA", 3); // particle cloud connected
+    sendSPI("OTA", 30); // particle cloud connected
   }
 }
 
@@ -834,8 +976,8 @@ void execCmd(String k, String v)
   if (k == "Spd")
   { // what change was it?
     saveSetSpeed = atof(v.c_str());
-    //Serial.print("+Spd: ");
-    //Serial.println(saveSetSpeed);
+    Serial.print("+Spd: ");
+    Serial.println(saveSetSpeed);
     setPumpSpeed(saveSetSpeed);
     if (saveSetSpeed == 0)
     {
@@ -849,6 +991,7 @@ void execCmd(String k, String v)
     setPumpFwd();
     lineLCD0();
     lineLCD(1, "Fill");
+    Serial.println("Fill");
     //lineLCDd(2, "Set Spd", saveSetSpeed, "%d", "%");
     showLCD();
   }
@@ -858,6 +1001,7 @@ void execCmd(String k, String v)
     setPumpSpeed(0.0);
     setRunSpeed(0);
     pumpStopTime = millis();
+    Serial.println("Off");
     //Serial.printlnf("OFF cmd: runPWM, pumpPWM, pumpFwd: %d, %d", runPWM, pumpPWM);
 
     lineLCD(1, "Pump Off");
@@ -867,6 +1011,7 @@ void execCmd(String k, String v)
     setPumpRev();
     lineLCD0();
     lineLCD(1, "Empty");
+    Serial.println("Empty");
   }
   else if (k == "Clear")
   {
@@ -882,7 +1027,7 @@ void execCmd(String k, String v)
     runningTime = 0;
     pumpStartTime = 0;
     pumpStopTime = 0;
-
+    Serial.println("Clear");
     sendSPI("rTIM", runningTime);
     lineLCD(1, "Clear");
   }
