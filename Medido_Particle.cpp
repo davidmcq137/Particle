@@ -63,7 +63,7 @@ volatile int pulseCountEmpty = 0;
 volatile int pulseCountStop = 0;
 int pulseCountBad = 0;
 int pulseStop = 10; // set # pulses to stop pump on piss tank sensor @77 pulses/oz this is 3.5 ml
-int flowRate = 0;
+float flowRate = 0;
 int lastPulseCountFill = 0;
 int lastPulseCountEmpty = 0;
 int lastPulseCountBad = 0;
@@ -680,11 +680,11 @@ void timerCB()
   if (dtms > 1000)
   {
     deltaT = (float)dtms / (1000. * 60.); // mins
-    deltaFFill = (pulseCountFill - lastPulseCountFill) / pulsePerOzFill;
-    deltaFEmpty = (pulseCountEmpty - lastPulseCountEmpty) / pulsePerOzEmpty;
+    deltaFFill = (float)(pulseCountFill - lastPulseCountFill) / pulsePerOzFill;
+    deltaFEmpty = (float)(pulseCountEmpty - lastPulseCountEmpty) / pulsePerOzEmpty;
     deltaF = deltaFFill - deltaFEmpty;
     flowRate = flowRate - (flowRate - (deltaF / deltaT)) / 1.2;
-    sendSPI("fRAT", (float)flowRate);
+    sendSPI("fRAT", flowRate);
     sendSPI("fCLK", (float)(millis() - bootTime));
     //sendSPI("fDEL", deltaF);
     //sendSPI("fDET", deltaT);
