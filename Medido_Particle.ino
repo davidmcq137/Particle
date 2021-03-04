@@ -11,7 +11,10 @@
 
 #define OLED_RESET D6
 
-//SYSTEM_MODE(MANUAL);
+SYSTEM_MODE(MANUAL);
+STARTUP(resetOLED());
+
+//SYSTEM_THREAD(ENABLED);
 
 float PIDpGain = 0.0;
 float PIDiGain = 0.5;
@@ -20,8 +23,8 @@ float PIDiTerm = 0;
 float MINpress = 0;
 float MAXpress = 10;
 float pressLimit = (MAXpress + MINpress) / 2;
-float pulsePerOzFill = 90.0;
-float pulsePerOzEmpty = 90.0;
+float pulsePerOzFill = 80.0;
+float pulsePerOzEmpty = 80.0;
 int dispRstPin = D6;
 int flowMeterPinFill = D3;  //A2;
 int flowMeterPinEmpty = D2; // A3;
@@ -78,7 +81,7 @@ volatile unsigned long lastEmptyMicro = 0;
 volatile int lastFillShort = 0;
 volatile int lastEmptyShort = 0;
 
-bool medidoEnabled = true;
+bool medidoEnabled = false;
 bool haveDisplay = false;
 
 const size_t UART_TX_BUF_SIZE = 100;  //20;
@@ -105,7 +108,8 @@ size_t txLen = 0;
 
 void onDataReceived(const uint8_t *data, size_t len, const BlePeerDevice &peer, void *context);
 String textacc = "";
-char textLCD[5][64];
+#define DISP_BUF_LEN 64
+char textLCD[5][DISP_BUF_LEN];
 
 // These UUIDs were defined by Nordic Semiconductor and are now the defacto standard for
 // UART-like services over BLE. Many apps support the UUIDs now, like the Adafruit Bluefruit app.
@@ -133,6 +137,8 @@ int kk;
 size_t mxch;
 uint8_t mxcmd[1];
 
+uint8_t connBLE[6];
+
 void powerDownTimeout()
 {
   sendSPI("PowerDown", 0.0);
@@ -148,8 +154,10 @@ Timer powerTimer(1000 * 60 * powerOffMins, powerDownTimeout);
 // loop() runs over and over again, as quickly as it can execute.
 void loop()
 {
-
-  Particle.process();
+  //if (Particle.connected()) {
+    Particle.process(); 
+  //}
+  
 
   if (medidoEnabled)
   {
@@ -186,11 +194,11 @@ void loop()
       kk = kk + 1;
     }
 
-    if (BLE.connected())
+    if (BLE.connected() && medidoEnabled)
     {
       //Serial.println("BLE connected");
-      if (millis() - lastPrt >= PRT_PERIOD_MS)
-      {
+      //if (millis() - lastPrt >= PRT_PERIOD_MS)
+      //{
         //for (size_t ii = 0; ii < 1; ii++)
         //{
         //  txBuf[ii] = 65;
@@ -200,8 +208,8 @@ void loop()
         //Serial.println("PRT!");
         //sendSPI("FOO", 137.0);
         //lastPrt = millis();
-        txLen = 0;
-      }
+        //txLen = 0;
+      //}
       //while (Serial.available() && txLen < UART_TX_BUF_SIZE)
       //{
       //  txBuf[txLen++] = Serial.read();
@@ -240,7 +248,7 @@ void loop()
         lastScan = millis();
 
         size_t count = BLE.scan(scanResults, SCAN_RESULT_COUNT);
-        Serial.printlnf("Scan Count: %d", count);
+        //Serial.printlnf("Scan Count: %d", count);
 
         if (count > 0)
         {
@@ -251,9 +259,27 @@ void loop()
             // looking to see if the serviceUuid is anywhere in the list.
             BleUuid foundServiceUuid;
             size_t svcCount = scanResults[ii].advertisingData.serviceUUID(&foundServiceUuid, 1);
-            Serial.print("svcCount: ");
-            Serial.println(svcCount);
-            if (svcCount > 0 && foundServiceUuid == serviceUuid)
+            //Serial.print("svcCount: ");
+            //Serial.println(svcCount);
+
+            bool matchAddr = true;
+            bool allFF = true;
+            for(int i = 0; i <= 5; i++){
+              if (connBLE[i] != scanResults[ii].address[i]) {
+                matchAddr = false;
+              }
+              if (connBLE[i] != 0xFF) {
+                allFF = false;
+              }
+            }
+
+            if (matchAddr) {
+              Serial.println("Addr Match");
+            } else {
+              Serial.println("No Addr Match");
+            }
+
+            if ( (matchAddr || allFF) && svcCount > 0 && foundServiceUuid == serviceUuid)
             {
 
               peer = BLE.connect(scanResults[ii].address);
@@ -261,6 +287,12 @@ void loop()
               //Serial.println(peer);
               if (peer.connected())
               {
+                if (allFF) {
+                  for(int i = 0; i <= 5; i++){
+                    connBLE[i] = scanResults[ii].address[i];
+                  }
+                  EEPROM.put(10, connBLE);
+                }
                 Serial.printlnf("successfully connected %02X:%02X:%02X:%02X:%02X:%02X!",
                                 scanResults[ii].address[0], scanResults[ii].address[1], scanResults[ii].address[2],
                                 scanResults[ii].address[3], scanResults[ii].address[4], scanResults[ii].address[5]);
@@ -304,6 +336,17 @@ void loop()
 
 Adafruit_SSD1306 display(OLED_RESET);
 
+void resetOLED()
+{
+// Setup a pin to reset the OLED display and do a clean hw reset
+  pinMode(dispRstPin, OUTPUT);
+  digitalWrite(dispRstPin, HIGH);    
+  delayMicroseconds(2000);
+  digitalWrite(dispRstPin, LOW);  
+  delayMicroseconds(2000);
+  digitalWrite(dispRstPin, HIGH);    
+}
+
 double ddisp;
 
 // setup() runs once, when the device is first turned on.
@@ -313,13 +356,25 @@ void setup()
 
   unsigned long tdisp;
   float fdisp;
-  
+    
   bootTime = millis();
 
-  Serial.begin(115200);
+  //Serial.begin(115200);
+  Serial.begin(38400);
+  
+  waitFor(Serial.isConnected, 10000);
 
   Serial.println("starting setup");
-
+  String addrTxt = "";
+  EEPROM.get(10, connBLE);
+  Serial.println("EEPROM");
+  for (int i = 0; i <= 5; i++){
+    addrTxt.concat(String::format("%02X:", connBLE[i]));
+    Serial.printlnf("%02X", connBLE[i]);
+  } 
+  unsigned int ll = addrTxt.length();
+  addrTxt.remove(ll-1);
+  Serial.println(addrTxt);
   tdisp = micros();
 
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // initialize with the I2C addr 0x3D (for the 128x64)
@@ -327,25 +382,32 @@ void setup()
   display.setTextSize(1);
   display.setTextColor(WHITE);
   fdisp = (float)(micros() - tdisp);
-  lineLCD0();
-  lineLCD(1, "Pump Ready");
-  //lineLCDf(2, "Time: ", fdisp, "%4.4f", "uS");
   ddisp = (double)fdisp;
   //Particle.variable("DispTime", &ddisp, DOUBLE);
-
   // since there is no easy way to get display status from the adafruit api, time how long the init takes
   // typically it's a little over 20,000 us .. so if over 2x that we must not have a display
-
   if (fdisp < 40000.)
   {
     haveDisplay = true;
   }
 
+  lineLCD0();
+  lineLCD(1, "Pump Ready");
+  lineLCD(2, "Bluetooth Central");
+  lineLCD(3, "Paired with:");
+  lineLCD(4, addrTxt.c_str());
+  lineLCD(5, "V 0.9 03/2021 DFM");
+  Serial.println("about to showLCD");
   showLCD();
+
+  lastShowDisplay = millis();
+  
   powerTimer.start();
   Serial.println("about to turn BLE on");
   int bleOnRet;
   bleOnRet = BLE.on();
+  BLE.selectAntenna(BleAntennaType::EXTERNAL);
+
   Serial.print("ble On Ret: ");
   Serial.println(bleOnRet);
   peerTxCharacteristic.onDataReceived(onDataReceived, &peerTxCharacteristic);
@@ -359,14 +421,15 @@ void setup()
 
   pinMode(pwmPumpPin, OUTPUT);
   analogWriteResolution(pwmPumpPin, 10);
-  analogWrite(pwmPumpPin, 0, 1000);
+  analogWrite(pwmPumpPin, 0, 10000);
 
   pinMode(flowDirPin, OUTPUT);
 
   // Preset pump speed to 0, set FWD direction
 
+  setRunSpeed(0);
   setPumpSpeed(0);
-  setPumpFwd();
+  //setPumpFwd();
 
   // Get a zero cal point on the current sensor
 
@@ -409,16 +472,13 @@ void setup()
   pinMode(powerDownPin, OUTPUT);
   digitalWrite(powerDownPin, LOW);
 
-  // Setup a pin to reset the OLED display
-
-  pinMode(dispRstPin, OUTPUT);
-
   sendSPI("Init", 0.0);
   sendSPI("rPWM", 0.0);
 
   // mainLoop.start();
 
-  //Serial.println("init done");
+  Serial.println("init done");
+  medidoEnabled = true;
 }
 
 void lineLCD0()
@@ -426,7 +486,7 @@ void lineLCD0()
   //display.clearDisplay();
   for (int i = 0; i <= 4; i++)
   {
-    strcpy(textLCD[i], "");
+    strncpy(textLCD[i], "", DISP_BUF_LEN);
   }
 }
 
@@ -472,15 +532,20 @@ void lineLCDd(int line, String text, int val, String fmt, String sfx)
 
 void showLCD()
 {
+  //Serial.println("showLCD");
+  //Serial.println(millis());
+  //Serial.println(lastShowDisplay);
+  //Serial.println(haveDisplay);
   if (!haveDisplay)
   {
     return;
   }
-  if (millis() - lastShowDisplay < 500)
+  if (millis() - lastShowDisplay < 200)
   {
     return;
   }
   lastShowDisplay = millis();
+  
   display.clearDisplay();
   for (int i = 0; i <= 4; i++)
   {
@@ -718,7 +783,7 @@ void timerCB()
     if (pulseCountBad != lastPulseCountBad)
     {
       sendSPI("cBAD", (float)pulseCountBad);
-      Serial.printlnf("cBAD: last %d %d", pulseCountBad, lastPulseCountBad);
+      //Serial.printlnf("cBAD: last %d %d", pulseCountBad, lastPulseCountBad);
       lastPulseCountBad = pulseCountBad;
     }
     deltaT = (float)dtms / (1000. * 60.); // mins
@@ -829,7 +894,7 @@ void timerCB()
  
   seq = seq + 1;
   //if ((seq % 5 == 0) && (millis() - bootTime > 5000))
-  if (millis() - bootTime > 1000)
+  if (millis() - bootTime > 3000)
   {
     lineLCDf(2, "Flow Rate ", flowRate, "%2.1f", " oz/s");
     lineLCDf(3, "Volume ", flowCount, "%4.1f", " oz");
@@ -867,7 +932,7 @@ void onDataReceived(const uint8_t *data, size_t len, const BlePeerDevice &peer, 
   //Log.trace("Received data from: %02X:%02X:%02X:%02X:%02X:%02X:", peer.address()[0], peer.address()[1], peer.address()[2], peer.address()[3], peer.address()[4], peer.address()[5]);
   //Serial.print(len);
 
-  Serial.println("in onDataReceived");
+  //Serial.println("in onDataReceived");
 
   for (size_t ii = 0; ii < len; ii++)
   {
@@ -984,6 +1049,13 @@ void execKwd(String k, String v)
   {
     Serial.println("Stop cmd received");
   }
+  else if (k == "unpair") {
+    Serial.println("unpair cmd");
+    for(int i=0; i <= 5; i++) {
+      connBLE[i] = 0xFF;
+    }
+    EEPROM.put(10, connBLE);
+  }
   else if (k == "update")
   {
     Serial.println("Update command received");
@@ -1001,36 +1073,47 @@ void execKwd(String k, String v)
     //Serial.print("image: ");
     //Serial.println(wifiimage);
 
-    WiFi.clearCredentials();
-    WiFi.setCredentials(wifissid, wifipwd);
+    //WiFi.clearCredentials();
+    if (wifissid != "" && wifipwd != "") { 
+      Serial.println("got some nonblank credentials");
+      WiFi.setCredentials(wifissid, wifipwd);
+    } else {
+      Serial.println("got blank credentials");
+    }
+
     WiFi.on();
     WiFi.connect();
 
     int wLoops = 0;
-    while (!WiFi.ready() && wLoops < 300)
+    while (!WiFi.ready() && wLoops < 600)
     { //timeout 30 seconds if no wifi or bad creds
       delay(100);
       wLoops = wLoops + 1;
     }
-    if (wLoops >= 300)
+    if (wLoops >= 600)
     {
+      Serial.println("No Wifi Connection");
       sendSPI("OTA", -1); //No WiFi connection
       return;
     }
+    Serial.println("Wifi connected");
     sendSPI("OTA", 2); // WiFi connected
     //System.enterSafeMode();
     Particle.connect();
     wLoops = 0;
     while (!Particle.connected() && wLoops < 300)
     {
+      Particle.process();
       delay(100);
       wLoops = wLoops + 1;
     }
     if (wLoops >= 300)
     {
+      Serial.println("No particle cloud connection");
       sendSPI("OTA", -30); // No Particle Cloud Connection
       return;
     }
+    Serial.println("Particle cloud connected");
     sendSPI("OTA", 30); // particle cloud connected
   }
 }
@@ -1111,12 +1194,12 @@ void execCmd(String k, String v)
   else if (k == "CalF")
   {
     Serial.printlnf("CalFactFill passed in: %s", v.c_str());
-    pulsePerOzFill = atof(v.c_str()) / 10.0;
+    pulsePerOzFill = atof(v.c_str());
   }
   else if (k == "CalE")
   {
     Serial.printlnf("CalFactEmpty passed in: %s", v.c_str());
-    pulsePerOzEmpty = atof(v.c_str()) / 10.0;
+    pulsePerOzEmpty = atof(v.c_str());
   }
   else if (k == "Prs")
   {
