@@ -8,26 +8,48 @@
 
 #include <Particle.h>
 #include "Adafruit_SSD1306.h"
+#include "Encoder.h"
+#include "math.h"
+
+PRODUCT_ID(14118);
+PRODUCT_VERSION(2);
+SYSTEM_MODE(MANUAL);
+STARTUP(resetOLED());
+SYSTEM_THREAD(ENABLED);
+
+Encoder spdEnc(D2, D3);
 
 #define OLED_RESET D6
 
-SYSTEM_MODE(MANUAL);
-STARTUP(resetOLED());
+long spdEncPos;
+long spdEncPosLast;
+float spdEncPsi = 5.0;
+bool manTouched = false;
 
-SYSTEM_THREAD(ENABLED);
+int manPumpState;
+int lastManPumpRead;
+int priorPumpState;
+int manPumpRead;
+unsigned long manPumpTime;
+unsigned long manPumpBounce = 100;
+
+int clrState;
+int lastClrRead;
+int clrRead;
+unsigned long clrTime;
 
 float PIDpGain = 0.0;
-float PIDiGain = 0.5;
+float PIDiGain = 1.0;
 float PIDpTerm = 0;
 float PIDiTerm = 0;
 float MINpress = 0;
 float MAXpress = 10;
 float pressLimit = (MAXpress + MINpress) / 2;
-float pulsePerOzFill = 80.0;
-float pulsePerOzEmpty = 80.0;
+float pulsePerOzFill = 64.0;
+float pulsePerOzEmpty = 64.0;
 int dispRstPin = D6;
-int flowMeterPinFill = D3;  //A2   //D3;
-int flowMeterPinEmpty = D2; // A3  //D2;
+int flowMeterPinFill = A2;  //A2   //D3;
+int flowMeterPinEmpty = A3; // A3  //D2;
 int flowMeterPinStop = A4;
 int powerDownPin = D5;
 int pwmPumpPin = D7;
@@ -76,15 +98,18 @@ unsigned long lastLoop = 0;
 unsigned long loopMinTime = 20;
 unsigned long lastTimerCB = 0;
 unsigned long minTimerCB = 100; // was 200
-volatile unsigned long lastFillMicro = 0;
-volatile unsigned long lastEmptyMicro = 0;
-volatile int lastFillShort = 0;
-volatile int lastEmptyShort = 0;
+//volatile unsigned long lastFillMicro = 0;
+//volatile unsigned long lastEmptyMicro = 0;
+//volatile int lastFillShort = 0;
+//volatile int lastEmptyShort = 0;
 
-const int maxSlopePoints = 8;
+const int maxSlopePoints = 10;
 volatile int currSlopePoints = 0;
 volatile unsigned long xx[maxSlopePoints];
-volatile unsigned int  yy[maxSlopePoints];
+volatile unsigned int yy[maxSlopePoints];
+double dxx[maxSlopePoints];
+double dyy[maxSlopePoints];
+
 //volatile double xx[maxSlopePoints];
 //volatile double yy[maxSlopePoints];
 volatile int xyIdx = 0;
@@ -93,6 +118,7 @@ bool medidoEnabled = false;
 bool haveDisplay = false;
 
 bool imperial = true;
+unsigned long lastmicros = 0;
 
 const size_t UART_TX_BUF_SIZE = 100;  //20;
 const size_t SCAN_RESULT_COUNT = 100; //20;
@@ -100,6 +126,7 @@ const size_t SCAN_RESULT_COUNT = 100; //20;
 BleScanResult scanResults[SCAN_RESULT_COUNT];
 
 const unsigned long SCAN_PERIOD_MS = 200; // was 2000
+
 unsigned long lastScan = 0;
 
 const unsigned long PRT_PERIOD_MS = 100; // was 1000
@@ -134,7 +161,6 @@ const BleUuid txUuid("6E400003-B5A3-F393-E0A9-E50E24DCCA9E");
 //const BleUuid mxUuid("75a9f022-af03-4e41-b4bc-9de90a47d50b");
 //                      a73e9a10-628f-4494-a099-12efaf72258f
 
-
 BleCharacteristic txCharacteristic("tx", BleCharacteristicProperty::NOTIFY, txUuid, serviceUuid);
 BleCharacteristic rxCharacteristic("rx", BleCharacteristicProperty::WRITE, rxUuid, serviceUuid, onDataReceived, NULL);
 //BleCharacteristic rxCharacteristic("rx", BleCharacteristicProperty::WRITE_WO_RSP, rxUuid, serviceUuid, onDataReceived, NULL);
@@ -149,6 +175,20 @@ uint8_t mxcmd[1];
 
 uint8_t connBLE[6];
 
+struct NVM
+{
+  uint8_t version;
+  uint8_t connBLE[6];
+  float CalF;
+  float CalE;
+  float Prs;
+  float Spd;
+  bool imperial;
+  int pMAX;
+};
+
+NVM medidoNVM;
+
 void powerDownTimeout()
 {
   sendSPI("PowerDown", 0.0);
@@ -159,15 +199,158 @@ void powerDownTimeout()
 
 Timer powerTimer(1000 * 60 * powerOffMins, powerDownTimeout);
 
+int manPumpSwitch()
+{
+  int manPumpFwd;
+  int manPumpRev;
+  if (digitalRead(D12) == HIGH)
+  {
+    manPumpFwd = 1;
+  }
+  else
+  {
+    manPumpFwd = 0;
+  }
+
+  if (digitalRead(D11) == HIGH)
+  {
+    manPumpRev = 1;
+  }
+  else
+  {
+    manPumpRev = 0;
+  }
+  return (manPumpRev + 2 * manPumpFwd);
+}
+
 //Timer mainLoop(200, timerCB);
+int loopcnt = 0;
+unsigned long sampleTime = 0;
 
 // loop() runs over and over again, as quickly as it can execute.
 void loop()
 {
+  loopcnt++;
+
   //if (Particle.connected()) {
-    Particle.process(); 
+  Particle.process();
   //}
-  
+
+  //Serial.print("Encoder: ");
+  //Serial.println(spdEncPos);
+
+  if (!BLE.connected())
+  { // check manual controls only if BLE not connected
+
+    clrRead = digitalRead(D4);
+
+    if (clrRead != lastClrRead)
+    {
+      clrTime = millis();
+    }
+
+    lastClrRead = clrRead;
+
+    if (millis() - clrTime > 50)
+    {
+      clrState = clrRead;
+    }
+
+    if (clrState == 0)
+    {
+      lineLCD(1, "Clear");
+    }
+
+    manPumpRead = manPumpSwitch();
+
+    if (manPumpRead != lastManPumpRead)
+    {
+      manPumpTime = millis();
+    }
+
+    lastManPumpRead = manPumpRead;
+
+    if ((millis() - manPumpTime) > manPumpBounce)
+    {
+      if (manPumpRead != manPumpState)
+      {
+        manPumpState = manPumpRead;
+      }
+    }
+
+    if (manPumpState != priorPumpState)
+    {
+      //if (Serial.available()) {
+      //  Serial.printlnf("state change: %d %d %d %d %lu", manPumpState, lastManPumpRead, priorPumpState, loopcnt, millis());
+      //}
+      if (priorPumpState == -1)
+      {
+        manPumpTime = 0;
+        priorPumpState = 0;
+      }
+      if (manPumpState == 0)
+      {
+        lineLCD(1, "Off");
+        execCmd("Off", "");
+      }
+      else if (manPumpState == 1 and priorPumpState == 0)
+      { // Off to Empty
+        lineLCD(1, "Empty");
+        //execCmd("CalF", "60.0");
+        //execCmd("CalE", "60.0");
+        //execCmd("pMAX", "1023");
+        //execCmd("Prs", "5.0");
+        execCmd("Spd", "100.0");
+        execCmd("Empty", "");
+      }
+      else if (manPumpState == 2 and priorPumpState == 0)
+      { // Off to Fill
+        lineLCD(1, "Fill");
+        execCmd("CalF", "60.0");
+        execCmd("CalE", "60.0");
+        execCmd("pMAX", "1023");
+        execCmd("Prs", "5.0");
+        execCmd("Spd", "100.0");
+        execCmd("Fill", "");
+      }
+      else
+      {
+        if (Serial.available())
+        {
+          Serial.printlnf("else: %d %d", manPumpState, priorPumpState);
+        }
+      }
+      showLCD();
+    }
+
+    priorPumpState = manPumpState;
+
+    //Serial.print("manPumpState");
+    //Serial.println(manPumpState);
+
+    spdEncPos = spdEnc.read();
+    if (spdEncPos != spdEncPosLast)
+    {
+      if (millis() - bootTime < 15000)
+      { // if manual controls touched in first 15 secs, don't start BLE
+        manTouched = true;
+      }
+      spdEncPsi = spdEncPsi + (float)(spdEncPosLast - spdEncPos) / 40.0;
+      if (spdEncPsi > 15.0)
+      {
+        spdEncPsi = 15.0;
+      }
+      if (spdEncPsi < 0.0)
+      {
+        spdEncPsi = 0.0;
+      }
+      pressLimit = spdEncPsi;
+      //PIDpGain = spdEncPsi * 10; // XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      lineLCDf(1, "Press Set ", spdEncPsi, "%.1f", " psi");
+      showLCD();
+    }
+    spdEncPosLast = spdEncPos;
+  }
 
   if (medidoEnabled)
   {
@@ -209,16 +392,16 @@ void loop()
       //Serial.println("BLE connected");
       //if (millis() - lastPrt >= PRT_PERIOD_MS)
       //{
-        //for (size_t ii = 0; ii < 1; ii++)
-        //{
-        //  txBuf[ii] = 65;
-        //}
-        //txLen = 1;
-        //peerRxCharacteristic.setValue(txBuf, txLen);
-        //Serial.println("PRT!");
-        //sendSPI("FOO", 137.0);
-        //lastPrt = millis();
-        //txLen = 0;
+      //for (size_t ii = 0; ii < 1; ii++)
+      //{
+      //  txBuf[ii] = 65;
+      //}
+      //txLen = 1;
+      //peerRxCharacteristic.setValue(txBuf, txLen);
+      //Serial.println("PRT!");
+      //sendSPI("FOO", 137.0);
+      //lastPrt = millis();
+      //txLen = 0;
       //}
       //while (Serial.available() && txLen < UART_TX_BUF_SIZE)
       //{
@@ -252,13 +435,14 @@ void loop()
     }
     else
     {
-      if (millis() - lastScan >= SCAN_PERIOD_MS)
+
+      if (millis() - lastScan >= SCAN_PERIOD_MS && manTouched == false)
       {
         // Time to scan
         lastScan = millis();
 
         size_t count = BLE.scan(scanResults, SCAN_RESULT_COUNT);
-        //Serial.printlnf("Scan Count: %d", count);
+        Serial.printlnf("Scan Count: %d", count);
 
         if (count > 0)
         {
@@ -274,24 +458,30 @@ void loop()
 
             bool matchAddr = true;
             bool allFF = true;
-            for(int i = 0; i <= 5; i++){
-              if (connBLE[i] != scanResults[ii].address[i]) {
+            for (int i = 0; i <= 5; i++)
+            {
+              if (medidoNVM.connBLE[i] != scanResults[ii].address[i])
+              {
                 matchAddr = false;
               }
-              if (connBLE[i] != 0xFF) {
+              if (medidoNVM.connBLE[i] != 0xFF)
+              {
                 allFF = false;
               }
             }
 
-            if (matchAddr) {
+            if (matchAddr)
+            {
               lineLCD(1, "BLE Addr Match");
               //Serial.println("Addr Match");
-            } else {
+            }
+            else
+            {
               lineLCD(1, "BLE Addr Search");
               //Serial.println("No Addr Match");
             }
 
-            if ( (matchAddr || allFF) && svcCount > 0 && foundServiceUuid == serviceUuid)
+            if ((matchAddr || allFF) && svcCount > 0 && foundServiceUuid == serviceUuid)
             {
 
               peer = BLE.connect(scanResults[ii].address);
@@ -299,11 +489,13 @@ void loop()
               //Serial.println(peer);
               if (peer.connected())
               {
-                if (allFF) {
-                  for(int i = 0; i <= 5; i++){
-                    connBLE[i] = scanResults[ii].address[i];
+                if (allFF)
+                {
+                  for (int i = 0; i <= 5; i++)
+                  {
+                    medidoNVM.connBLE[i] = scanResults[ii].address[i];
                   }
-                  EEPROM.put(10, connBLE);
+                  EEPROM.put(10, medidoNVM);
                 }
                 //Serial.printlnf("successfully connected %02X:%02X:%02X:%02X:%02X:%02X!",
                 //                scanResults[ii].address[0], scanResults[ii].address[1], scanResults[ii].address[2],
@@ -317,7 +509,7 @@ void loop()
                 //Serial.println(rxUuid);
 
                 // Could do this instead, but since the names are not as standardized, UUIDs are better
-                
+
                 //bool txResult = peer.getCharacteristicByDescription(peerTxCharacteristic, "tx");
                 //if (txResult) {
                 //  Serial.println("tx result true");
@@ -335,7 +527,9 @@ void loop()
                 //if (mxResult) {
                 //  Serial.println("mx result true");
                 //}
-              } else {
+              }
+              else
+              {
                 //Serial.println("Connect failed!!!!");
               }
               break;
@@ -351,13 +545,13 @@ Adafruit_SSD1306 display(OLED_RESET);
 
 void resetOLED()
 {
-// Setup a pin to reset the OLED display and do a clean hw reset
+  // Setup a pin to reset the OLED display and do a clean hw reset
   pinMode(dispRstPin, OUTPUT);
-  digitalWrite(dispRstPin, HIGH);    
+  digitalWrite(dispRstPin, HIGH);
   delayMicroseconds(2000);
-  digitalWrite(dispRstPin, LOW);  
+  digitalWrite(dispRstPin, LOW);
   delayMicroseconds(2000);
-  digitalWrite(dispRstPin, HIGH);    
+  digitalWrite(dispRstPin, HIGH);
 }
 
 double ddisp;
@@ -369,38 +563,92 @@ void setup()
 
   unsigned long tdisp;
   float fdisp;
-    
-// sensor pin to unpair BLE
-// if low, then unpair
-  pinMode(D4, INPUT_PULLUP);
-  if (digitalRead(D4) == LOW) {
-    for(int i=0; i <= 5; i++) {
-      connBLE[i] = 0xFF;
-    }
-    EEPROM.put(10, connBLE);
-  }
 
   bootTime = millis();
 
+  noInterrupts();
   currSlopePoints = 0;
   xyIdx = 0;
+  interrupts();
 
   Serial.begin(115200);
   //Serial.begin(38400);
-  
-  waitFor(Serial.isConnected, 10000);
+
+  //waitFor(Serial.isConnected, 10000); // comment this line out for production so it does not delay startup .. uncomment for debugging so we don't miss messages
 
   Serial.println("starting setup");
   String addrTxt = "";
-  EEPROM.get(10, connBLE);
+
   Serial.println("EEPROM");
-  for (int i = 0; i <= 5; i++){
-    addrTxt.concat(String::format("%02X:", connBLE[i]));
-    Serial.printlnf("%02X", connBLE[i]);
-  } 
+
+  EEPROM.get(10, medidoNVM);
+
+  Serial.print("Version: ");
+  Serial.println(medidoNVM.version);
+  Serial.print("pMAX: ");
+  Serial.println(medidoNVM.pMAX);
+
+  //struct NVM {
+  //  uint8_t version;
+  //  uint8_t connBLE[6];
+  //  float CalF;
+  //  float CalE;
+  //  float Prs;
+  //  float Spd;
+  //  bool imperial;
+  //  int pMAX;
+  //};
+
+  // blank EEPROM is filled with 0xFF .. initialize if so
+
+  if (medidoNVM.version == 0xFF)
+  {
+    medidoNVM.version = 1;
+    medidoNVM.CalF = pulsePerOzFill;
+    medidoNVM.CalE = pulsePerOzEmpty;
+    medidoNVM.Prs = pressLimit;
+    medidoNVM.Spd = 0;
+    medidoNVM.imperial = true;
+    medidoNVM.pMAX = maxPWM;
+  }
+
+  // here if we have a valid version on read, or have initialized a blank
+  // set up operational variables in case we will be runnnig manual
+  // if running from external, these values are resent each time the pump starts
+
+  pulsePerOzFill = medidoNVM.CalF;
+  pulsePerOzEmpty = medidoNVM.CalE;
+  pressLimit = medidoNVM.Prs;
+  saveSetSpeed = medidoNVM.Spd;
+  imperial = medidoNVM.imperial;
+  opPWM = medidoNVM.pMAX;
+
+  Serial.printlnf("pulsePerOzFill: %f", pulsePerOzFill);
+  Serial.printlnf("pulsePerOzEmpty: %f", pulsePerOzEmpty);
+
+  // sensor pin to unpair BLE
+  // if low, then unpair
+
+  pinMode(D4, INPUT_PULLUP);
+  if (digitalRead(D4) == LOW)
+  {
+    for (int i = 0; i <= 5; i++)
+    {
+      medidoNVM.connBLE[i] = 0xFF;
+    }
+    EEPROM.put(10, medidoNVM);
+  }
+  for (int i = 0; i <= 5; i++)
+  {
+    addrTxt.concat(String::format("%02X:", medidoNVM.connBLE[i]));
+    //Serial.printlnf("%02X", medidoNVM.connBLE[i]);
+  }
   unsigned int ll = addrTxt.length();
-  addrTxt.remove(ll-1);
+  addrTxt.remove(ll - 1);
   Serial.println(addrTxt);
+
+  //EEPROM.put(10, medidoNVM);
+
   tdisp = micros();
 
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C); // initialize with the I2C addr 0x3D (for the 128x64)
@@ -422,12 +670,28 @@ void setup()
   lineLCD(2, "Bluetooth Central");
   lineLCD(3, "Paired with:");
   lineLCD(4, addrTxt.c_str());
-  lineLCD(5, "V 0.92 03/06/21 DFM");
+  lineLCD(5, "V 0.97 03/27/21 DFM");
   //Serial.println("about to showLCD");
   showLCD();
 
   lastShowDisplay = millis();
-  
+
+  pinMode(D4, INPUT_PULLUP);    // pushbutton on rotary switch
+  pinMode(D11, INPUT_PULLDOWN); // fwd/rev switch for manual operation (MISO, MOSI also D11,D12)
+  pinMode(D12, INPUT_PULLDOWN);
+
+  clrState = digitalRead(D4);
+  lastClrRead = clrState;
+  clrTime = 0;
+
+  manPumpState = manPumpSwitch(); // read actual switch position
+  lastManPumpRead = -1;
+  priorPumpState = -1;
+  manPumpTime = 0;
+
+  Serial.print("init pump sw to state ");
+  Serial.println(manPumpState);
+
   powerTimer.start();
   //Serial.println("about to turn BLE on");
   //int bleOnRet;
@@ -448,7 +712,7 @@ void setup()
 
   pinMode(pwmPumpPin, OUTPUT);
   analogWriteResolution(pwmPumpPin, 10);
-  analogWrite(pwmPumpPin, 0, 10000);
+  analogWrite(pwmPumpPin, 0, 16000);
 
   pinMode(flowDirPin, OUTPUT);
 
@@ -487,7 +751,7 @@ void setup()
 
   // experiment .. only attachInterrupt when about to run
   pinMode(flowMeterPinFill, INPUT);
-  //attachInterrupt(flowMeterPinFill, gpioCBFill, FALLING);
+  attachInterrupt(flowMeterPinFill, gpioCBFill, FALLING);
 
   pinMode(flowMeterPinEmpty, INPUT);
   //attachInterrupt(flowMeterPinEmpty, gpioCBEmpty, FALLING);
@@ -544,7 +808,7 @@ void showLCD()
     return;
   }
   lastShowDisplay = millis();
-  
+
   display.clearDisplay();
   for (int i = 0; i <= 4; i++)
   {
@@ -553,7 +817,7 @@ void showLCD()
   }
   display.display();
 }
-char tstr[32];
+char tstr[40];
 char *timeFmt(int tt)
 {
 
@@ -576,48 +840,54 @@ double slope()
 {
   double xbar = 0.0;
   double ybar = 0.0;
-  double sxy  = 0.0;
-  double sx2  = 0.0;
-  double dxx[maxSlopePoints];
-  double dyy[maxSlopePoints];
-
-  if (currSlopePoints < 2) {
-    return (0);
-  }
-
+  double sxy = 0.0;
+  double sx2 = 0.0;
+  int csp = 0;
+  
   noInterrupts(); // take the risk of missing a pulse to ensure data integrity - copy to local doubles
-  for(int i=0; i < currSlopePoints; i++) {
+
+  if (currSlopePoints < 2) // can't make a line 
+  {
+    interrupts();
+    return (0.0);
+  }
+  csp = currSlopePoints;
+  interrupts();
+
+  for (int i = 0; i < csp; i++) // copy to nonvolatile variables and cast to double
+  {
     dxx[i] = (double)xx[i];
     dyy[i] = (double)yy[i];
   }
-  interrupts();
-  
-  for(int i=0; i < currSlopePoints; i++) {
-    if (micros() - dxx[i] > 1.E+6) { // defend against old points (>1s) stuck in buffer
+
+  for (int i = 0; i < csp; i++)
+  {
+    if (micros() - dxx[i] > 1.E+6)
+    { // defend against old points (>1s) stuck in buffer
+      noInterrupts();
       currSlopePoints = 0;
       xyIdx = 0;
-      return 0.0;
+      interrupts();
+      return (0.0);
     }
     xbar = xbar + dxx[i];
     ybar = ybar + dyy[i];
-  }  
-  xbar = xbar / currSlopePoints;
-  ybar = ybar / currSlopePoints;
-  for(int i=0; i < currSlopePoints; i++) {
-    sxy = sxy + ( (dxx[i] - xbar) * (dyy[i] - ybar) );
-    sx2 = sx2 + ( (dxx[i] - xbar) * (dxx[i] - xbar) ); 
   }
-  if (sx2 < 1.E-6) {
+  xbar = xbar / (double)csp;
+  ybar = ybar / (double)csp;
+
+  for (int i = 0; i < csp; i++)
+  {
+    sxy = sxy + ((dxx[i] - xbar) * (dyy[i] - ybar));
+    sx2 = sx2 + ((dxx[i] - xbar) * (dxx[i] - xbar));
+  }
+  if (sx2 < 1.E-6)
+  {
     sx2 = 1.E-6;
   }
-  
-  return sxy / sx2;
-}
 
-//const int maxSlopePoints = 8;
-//volatile double xx[maxSlopePoints];
-//volatile double yy[maxSlopePoints];
-//volatile int xyIdx = -1;
+  return (sxy / sx2);
+}
 
 void gpioCBFill()
 {
@@ -626,26 +896,55 @@ void gpioCBFill()
   //  lastFillShort = lastFillShort + 1;
   //}
   //lastFillMicro = micros();
+  //noInterrupts(); // not required in ISR
+  unsigned long mic = micros();
+
+  // experiment: look for spurious pulses that occur too soon and ignore them
+  // 16000 usec is about 60 oz/min
+  // so in normal execution it should always be greater than that...
+  if (mic - lastmicros < 16000) {
+    return;
+  }
+  lastmicros = mic;
+
   if (pumpFwd)
   {
-    noInterrupts();
     pulseCountFill += 1;
-    if (currSlopePoints < maxSlopePoints) {
+    if (currSlopePoints < maxSlopePoints)
+    {
       currSlopePoints += 1;
     }
     xx[xyIdx] = micros();
     yy[xyIdx] = pulseCountFill;
-    if (xyIdx + 1 >= maxSlopePoints) {
+    if (xyIdx + 1 >= maxSlopePoints)
+    {
       xyIdx = 0;
-    } else {
+    }
+    else
+    {
       xyIdx += 1;
     }
   }
   else
   {
-    pulseCountBad += 1;
+    //pulseCountBad += 1;
+    pulseCountEmpty += 1;
+    if (currSlopePoints < maxSlopePoints)
+    {
+      currSlopePoints += 1;
+    }
+    if (xyIdx + 1 >= maxSlopePoints)
+    {
+      xyIdx = 0;
+    }
+    else
+    {
+      xyIdx += 1;
+    }
+    xx[xyIdx] = micros();
+    yy[xyIdx] = -pulseCountEmpty;
   }
-  interrupts();
+  //interrupts(); // not requiured in ISR
 }
 
 void gpioCBEmpty()
@@ -660,17 +959,20 @@ void gpioCBEmpty()
   {
     noInterrupts();
     pulseCountEmpty += 1;
-    if (currSlopePoints < maxSlopePoints) {
+    if (currSlopePoints < maxSlopePoints)
+    {
       currSlopePoints += 1;
     }
-    if (xyIdx + 1 >= maxSlopePoints) {
+    if (xyIdx + 1 >= maxSlopePoints)
+    {
       xyIdx = 0;
-    } else {
+    }
+    else
+    {
       xyIdx += 1;
     }
     xx[xyIdx] = micros();
     yy[xyIdx] = -pulseCountEmpty;
-
   }
   else
   {
@@ -682,9 +984,9 @@ void gpioCBEmpty()
 void gpioCBStop()
 {
   // code to stop goes here
-  noInterrupts();
-  pulseCountStop += 1;
-  interrupts();
+  //noInterrupts();
+  //pulseCountStop += 1;
+  //interrupts();
   //Serial.print("number of stop pulses: ");
   //Serial.println(pulseCountStop);
 }
@@ -707,7 +1009,7 @@ int oldspd = 0;
 
 void setPumpSpeed(float ps)
 {                                      // this is ps units // 0 to 100%
-  pumpPWM = (int)(ps * opPWM / 100.0); //math.floor(ps*opPWM/100)
+  pumpPWM = (int)(ps * (float)opPWM / 100.0); //math.floor(ps*opPWM/100)
   if (pumpPWM < minPWM)
   {
     pumpPWM = 0;
@@ -809,7 +1111,8 @@ void timerCB()
   //float deltaT;
   unsigned long dtms;
   float vbatt;
-  
+  bool temp;
+
   // send the app a message if we get #pulses > pulseStop  at piss tank sensor
 
   if (millis() - lastTimerCB < minTimerCB)
@@ -829,6 +1132,53 @@ void timerCB()
   sendSPI("pPSI", pressPSI);
 
   //if pressPSI < 0 then pressPSI = 0 end
+
+  if ((pumpFwd && (runPWM > 0)) && (PIDiGain != 0 or PIDpGain != 0))
+  {
+    errsig = pressLimit - pressPSI;
+    if (errsig < 1.0 && errsig > -1.0) { // XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+      PIDpTerm = errsig * PIDpGain;
+    } else {
+      PIDpTerm = 0.0;
+    }
+
+    PIDiTerm = PIDiTerm + errsig * PIDiGain;
+    if (PIDiTerm < 0.0)
+    {
+      PIDiTerm = 0.0;
+    }
+    if (PIDiTerm > 100.0)
+    {
+      PIDiTerm = 100.0;
+    }
+    pSpd = PIDpTerm + PIDiTerm;
+    if (pSpd < 0.0)
+    {
+      pSpd = 0.0;
+    }
+    if (pSpd > saveSetSpeed)
+    {
+      pSpd = saveSetSpeed;
+    }
+    //if (( runPWM != 0) && (abs(millis() - pumpStopTime) > 1000) ){ // guard against asynch off in last sec
+    noInterrupts(); //enablePump is volatile
+    temp = enablePump;
+    interrupts();
+    if (not temp)
+    { // in case cmd came in asynch
+      setPumpSpeed(0.0);
+      setRunSpeed(0);
+    }
+    else
+    {
+      if (runPWM != 0)
+      {
+        setPumpSpeed(pSpd);   // side effect: sets pumpPWM within bounds
+        setRunSpeed(pumpPWM); // side effect: sets runPWM
+      }
+    }
+  }
+
 
   flowCount = ((float)pulseCountFill / pulsePerOzFill) - ((float)pulseCountEmpty / pulsePerOzEmpty);
 
@@ -860,12 +1210,15 @@ void timerCB()
     //deltaFFill = (float)(pulseCountFill - lastPulseCountFill) / pulsePerOzFill;
     //deltaFEmpty = (float)(pulseCountEmpty - lastPulseCountEmpty) / pulsePerOzEmpty;
     //deltaF = deltaFFill - deltaFEmpty;
-    
+
     //flowRate = flowRate - (flowRate - (deltaF / deltaT)) / 1.2;
-    
-    if (pumpFwd) {
+
+    if (pumpFwd)
+    {
       flowRate = slope() * 1.E+6 * 60.0 / pulsePerOzFill; // convert from counts per microsecond (oz/m)in
-    } else {
+    }
+    else
+    {
       flowRate = slope() * 1.E+6 * 60.0 / pulsePerOzEmpty; // convert from counts per microsecond oz/min
     }
     //Serial.printlnf("flowRate %.2f", flowRate);
@@ -922,64 +1275,38 @@ void timerCB()
   {
     revSpd = revSpd + (revSpdMax - revSpd) / 6.0; //soft start... don't slam on
     if (runPWM != 0)
-    { 
-      if (enablePump) {
+    {
+      noInterrupts(); // enablePump is volatile
+      temp = enablePump;
+      interrupts();
+
+      if (temp)
+      {
         setPumpSpeed(revSpd);
         setRunSpeed(pumpPWM);
-      } else {
+      }
+      else
+      {
         setPumpSpeed(0.0);
         setRunSpeed(0);
       }
     }
   }
-  if ((pumpFwd && (runPWM > 0)) && (PIDiGain != 0 or PIDpGain != 0))
-  {
-    errsig = pressLimit - pressPSI;
-    PIDpTerm = errsig * PIDpGain;
-    PIDiTerm = PIDiTerm + errsig * PIDiGain;
-    if (PIDiTerm < 0.0)
-    {
-      PIDiTerm = 0.0;
-    }
-    if (PIDiTerm > 100.0)
-    {
-      PIDiTerm = 100.0;
-    }
-    pSpd = PIDpTerm + PIDiTerm;
-    if (pSpd < 0.0)
-    {
-      pSpd = 0.0;
-    }
-    if (pSpd > saveSetSpeed)
-    {
-      pSpd = saveSetSpeed;
-    }
-    //if (( runPWM != 0) && (abs(millis() - pumpStopTime) > 1000) ){ // guard against asynch off in last sec
-    if (not enablePump)
-    { // in case cmd came in asynch
-      setPumpSpeed(0.0);
-      setRunSpeed(0);
-    }
-    else
-    {
-      if (runPWM != 0)
-      {
-        setPumpSpeed(pSpd);   // side effect: sets pumpPWM within bounds
-        setRunSpeed(pumpPWM); // side effect: sets runPWM
-      }
-    }
-  }
- 
+
+
   seq = seq + 1;
   //if ((seq % 5 == 0) && (millis() - bootTime > 5000))
   if (millis() - bootTime > 2000)
   {
-    if (imperial) {
-      lineLCDf(2, "Flowrate ", flowRate, "%2.1f", " oz/m");
-      lineLCDf(3, "Flow ", flowCount, "%4.1f", " oz");
-    } else {
-      lineLCDf(2, "Flowrate ", (int)(flowRate * 29.57), "%d", " ml/m");
-      lineLCDf(3, "Flow ", (int)(flowCount * 29.57), "%d", " ml");
+    if (imperial)
+    {
+      lineLCDf(2, "Flowrate ", flowRate, "%.1f", " oz/m");
+      lineLCDf(3, "Flow ", flowCount, "%.1f", " oz");
+    }
+    else
+    {
+      lineLCDf(2, "Flowrate ", flowRate * 0.02957, "%.2f", " L/m");
+      lineLCDf(3, "Flow ", flowCount * 0.02957, "%.2f", " L");
     }
 
     if (runPWM == 0)
@@ -1133,13 +1460,15 @@ void execKwd(String k, String v)
   {
     //Serial.println("Stop cmd received");
   }
-  else if (k == "unpair") {
+  else if (k == "unpair")
+  {
     //Serial.println("unpair cmd");
     lineLCD(1, "Unpair");
-    for(int i=0; i <= 5; i++) {
-      connBLE[i] = 0xFF;
+    for (int i = 0; i <= 5; i++)
+    {
+      medidoNVM.connBLE[i] = 0xFF;
     }
-    EEPROM.put(10, connBLE);
+    EEPROM.put(10, medidoNVM);
   }
   else if (k == "update")
   {
@@ -1160,23 +1489,35 @@ void execKwd(String k, String v)
     //Serial.println(wifiimage);
 
     //WiFi.clearCredentials();
-    if (wifissid != "" && wifipwd != "") { 
-      //Serial.println("got some nonblank credentials");
+    if (wifissid != "" && wifipwd != "")
+    {
+      Serial.println("got some nonblank credentials");
+      Serial.println(wifissid);
+      Serial.println(wifipwd);
+      //WiFi.clearCredentials();
       WiFi.setCredentials(wifissid, wifipwd);
-    } else {
-      //Serial.println("got blank credentials");
+          if (WiFi.hasCredentials()){
+        Serial.println("device reports it has credentials");
+      }
+    }
+    else // perhaps device has stored credentials we can use
+    {
+      Serial.println("got blank credentials");
     }
 
     WiFi.on();
     WiFi.connect();
 
     int wLoops = 0;
-    while (!WiFi.ready() && wLoops < 600)
-    { //timeout 30 seconds if no wifi or bad creds
+    while (!WiFi.ready() && wLoops < 1200)
+    { //timeout if no wifi or bad creds
       delay(100);
       wLoops = wLoops + 1;
+        //if (WiFi.connecting()) {
+          //Serial.println("Connecting");
+        //}
     }
-    if (wLoops >= 600)
+    if (wLoops >= 1200)
     {
       //Serial.println("No Wifi Connection");
       lineLCD(1, "No WiFi Connection");
@@ -1204,8 +1545,20 @@ void execKwd(String k, String v)
       return;
     }
     //Serial.println("Particle cloud connected");
-    lineLCD(1, "Cloud Connected");
-    sendSPI("OTA", 30); // particle cloud connected
+    if (Particle.connected()) {
+      lineLCD(1, "Cloud Connected");
+      sendSPI("OTA", 30); // particle cloud connected
+      System.enableUpdates();
+    }
+    if (System.updatesPending()) {
+      lineLCD(1, "Update available");
+      sendSPI("OTA", 40);
+    } else {
+      lineLCD(1, "No Update Avail");
+      //sendSPI("OTA", 50);
+      //Particle.disconnect();
+      //WiFi.off();
+    }
   }
 }
 
@@ -1229,34 +1582,39 @@ void execCmd(String k, String v)
       lineLCD(1, "Pump Off");
     }
     //lineLCDd(2, "Set Spd", saveSetSpeed, "%d", "%");
+    medidoNVM.Spd = saveSetSpeed;
     showLCD();
   }
   else if (k == "Fill")
   {
+    noInterrupts(); // these three are volatile
     enablePump = true;
     currSlopePoints = 0;
     xyIdx = 0;
-    attachInterrupt(flowMeterPinFill, gpioCBFill, FALLING);     
-    attachInterrupt(flowMeterPinStop, gpioCBStop, FALLING);    
+    interrupts();
+    //attachInterrupt(flowMeterPinFill, gpioCBFill, FALLING);
+    //attachInterrupt(flowMeterPinStop, gpioCBStop, FALLING);
     setPumpFwd();
     lineLCD0();
     lineLCD(1, "Fill");
     //Serial.println("Fill");
     //lineLCDd(2, "Set Spd", saveSetSpeed, "%d", "%");
     showLCD();
-    lastFillShort = 0;
-    lastEmptyShort = 0;
+    //lastFillShort = 0;
+    //lastEmptyShort = 0;
   }
   else if (k == "Off")
   {
     //Serial.println("pump stop k=off");
+    noInterrupts();
     enablePump = false;
+    interrupts();
     setPumpSpeed(0.0);
     setRunSpeed(0);
     pumpStopTime = millis();
-    detachInterrupt(flowMeterPinFill);
-    detachInterrupt(flowMeterPinEmpty);
-    detachInterrupt(flowMeterPinStop);
+    //detachInterrupt(flowMeterPinFill);
+    //detachInterrupt(flowMeterPinEmpty);
+    //detachInterrupt(flowMeterPinStop);
     //Serial.println("Off");
     //Serial.printlnf("OFF cmd: runPWM, pumpPWM, pumpFwd: %d, %d", runPWM, pumpPWM);
 
@@ -1265,10 +1623,13 @@ void execCmd(String k, String v)
   else if (k == "Empty")
   {
     revSpdMax = saveSetSpeed;
+    noInterrupts();
     currSlopePoints = 0;
     xyIdx = 0;
     enablePump = true;
-    attachInterrupt(flowMeterPinEmpty, gpioCBEmpty, FALLING);
+    interrupts();
+    //attachInterrupt(flowMeterPinEmpty, gpioCBEmpty, FALLING);
+    //attachInterrupt(flowMeterPinFill, gpioCBFill, FALLING);
     setPumpRev();
     lineLCD0();
     lineLCD(1, "Empty");
@@ -1276,9 +1637,11 @@ void execCmd(String k, String v)
   }
   else if (k == "Clear")
   {
+    noInterrupts();
     pulseCountFill = 0;
     pulseCountEmpty = 0;
     pulseCountBad = 0;
+    interrupts();
 
     lastPulseCountFill = 0;
     lastPulseCountEmpty = 0;
@@ -1296,15 +1659,17 @@ void execCmd(String k, String v)
   {
     //Serial.printlnf("CalFactFill passed in: %s", v.c_str());
     pulsePerOzFill = atof(v.c_str());
+    medidoNVM.CalF = pulsePerOzFill;
   }
   else if (k == "CalE")
   {
     //Serial.printlnf("CalFactEmpty passed in: %s", v.c_str());
     pulsePerOzEmpty = atof(v.c_str());
+    medidoNVM.CalE = pulsePerOzEmpty;
   }
   else if (k == "Prs")
   {
-    pressLimit = atof(v.c_str()) / 10.0;
+    pressLimit = atof(v.c_str());
     if (pressLimit > MAXpress)
     {
       pressLimit = MAXpress;
@@ -1313,6 +1678,7 @@ void execCmd(String k, String v)
     {
       pressLimit = MINpress;
     }
+    medidoNVM.Prs = pressLimit;
   }
   else if (k == "PwrOff")
   {
@@ -1329,12 +1695,27 @@ void execCmd(String k, String v)
     {
       opPWM = minPWM;
     }
-  } else if (k == "Imp") {
-    imperial = true;
-  } else if (k == "Met") {
-    imperial = false;
+    medidoNVM.pMAX = opPWM;
   }
-    else
+  else if (k == "Imp")
+  {
+    imperial = true;
+    medidoNVM.imperial = true;
+  }
+  else if (k == "Met")
+  {
+    imperial = false;
+    medidoNVM.imperial = false;
+  }
+  else if (k == "Sav")
+  {
+    Serial.println("Save command received .. storing EEPROM");
+    Serial.printlnf("pulsePerOzFill: %.2f", pulsePerOzFill);
+    Serial.printlnf("pulsePerOzEmpty: %.2f", pulsePerOzEmpty);
+
+    EEPROM.put(10, medidoNVM);
+  }
+  else
   {
     Serial.printlnf("execCmd cmd error: k,v = %s,%s", k.c_str(), v.c_str());
   }
