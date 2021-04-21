@@ -51,6 +51,7 @@ SYSTEM_THREAD(ENABLED);
 Encoder spdEnc(D2, D3);
 
 #define OLED_RESET D6
+#define PWM_FREQ 4000
 
 long spdEncPos;
 long spdEncPosLast;
@@ -701,7 +702,7 @@ void setup()
   lineLCD(2, "Bluetooth Central");
   lineLCD(3, "Paired with:");
   lineLCD(4, addrTxt.c_str());
-  lineLCD(5, "V 0.97 03/27/21 DFM");
+  lineLCD(5, "V 0.98 04/02/21 DFM");
   //Serial.println("about to showLCD");
   showLCD();
 
@@ -743,7 +744,7 @@ void setup()
 
   pinMode(pwmPumpPin, OUTPUT);
   analogWriteResolution(pwmPumpPin, 10);
-  analogWrite(pwmPumpPin, 0, 16000);
+  analogWrite(pwmPumpPin, 0, PWM_FREQ);
 
   pinMode(flowDirPin, OUTPUT);
 
@@ -1029,7 +1030,7 @@ void setRunSpeed(int pw)
 
   sendSPI("rPWM", (float)pw);
 
-  analogWrite(pwmPumpPin, pw);
+  analogWrite(pwmPumpPin, pw, PWM_FREQ);
   //Serial.print("just sent pw: ");
   //Serial.println(pw);
 
